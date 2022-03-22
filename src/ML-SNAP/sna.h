@@ -33,10 +33,10 @@ struct SNA_BINDICES {
 class SNA : protected Pointers {
 
  public:
-  SNA(LAMMPS *, double, int, double, int, int, int, int, int, int, int);
+  SNA(LAMMPS *, double, int, double, int, int, int, int, int, int, int); // extra int for chembed dim
 
   SNA(LAMMPS *lmp) : Pointers(lmp){};
-  ~SNA() override;
+  ~SNA();
   void build_indexlist();
   void init();
   double memory_usage();
@@ -53,39 +53,34 @@ class SNA : protected Pointers {
 
   // functions for derivatives
 
-  void compute_duidrj(int);
-  void compute_dbidrj();
-  void compute_deidrj(double *);
+  void compute_duidrj(double *, double, double, int);
+  void compute_dbidrj(int);
+  void compute_deidrj(double *, int);
   double compute_sfac(double, double);
   double compute_dsfac(double, double);
 
-  double compute_sfac_inner(double, double, double);
-  double compute_dsfac_inner(double, double, double);
-
-  // public bispectrum data
-
-  int twojmax;
   double *blist;
   double **dblist;
-
-  // short neighbor list data
+  double **rij;
+  int *inside;
+  double *wj;
+  double *rcutij;
+  int *element;    // index on [0,nelements)
+  int nmax;
 
   void grow_rij(int);
-  int nmax;         // allocated size of short lists
 
-  double **rij;     // short rij list
-  int *inside;      // short neighbor list
-  double *wj;       // short weight list
-  double *rcutij;   // short cutoff list
+  int twojmax;
+  double *ylist_r, *ylist_i;
+  int idxcg_max, idxu_max, idxz_max, idxb_max;
 
-  // only allocated for switch_inner_flag=1
-
-  double *rinnerij; // short inner cutoff list
-  double *drinnerij;// short inner range list
-
-  // only allocated for chem_flag=1
-
-  int *element;     // short element list [0,nelements)
+	// for chemical embedding
+	int chembed_dim;      // chemical embedding dimension (used if chembed_flag == 1)
+  double*** chembed_tau;// chemical embedding compression matrices for each central element
+	double** chembed_tau_sum; // for each central element sum over all element contributions for every compressed dimension (time saver)
+	int*** chembed_do; // index of non null terms of chembed_tau, so we can save time on loops
+	int**	chembed_until; // size of chembed_do to stop loop
+	void read_chembedfile(char *,char **,int *);
 
  private:
   double rmin0, rfac0;
@@ -100,7 +95,7 @@ class SNA : protected Pointers {
   int ***idxcg_block;
 
   double *ulisttot_r, *ulisttot_i;
-  double **ulist_r_ij, **ulist_i_ij; // short u list
+  double **ulist_r_ij, **ulist_i_ij;
   int *idxu_block;
 
   double *zlist_r, *zlist_i;
@@ -109,10 +104,6 @@ class SNA : protected Pointers {
   int ***idxb_block;
 
   double **dulist_r, **dulist_i;
-  int elem_duarray;    // element of j in derivative
-
-  double *ylist_r, *ylist_i;
-  int idxcg_max, idxu_max, idxz_max, idxb_max;
 
   void create_twojmax_arrays();
   void destroy_twojmax_arrays();
@@ -120,22 +111,16 @@ class SNA : protected Pointers {
   void print_clebsch_gordan();
   void init_rootpqarray();
   void zero_uarraytot(int);
-  void add_uarraytot(double, int);
+  void add_uarraytot(double, double, double, int, int);
   void compute_uarray(double, double, double, double, double, int);
   double deltacg(int, int, int);
   void compute_ncoeff();
-  void compute_duarray(double, double, double, double, double, double,
-                       double, double, int);
+  void compute_duarray(double, double, double, double, double, double, double, double, int);
 
   // Sets the style for the switching function
   // 0 = none
   // 1 = cosine
   int switch_flag;
-
-  // Sets the style for the inner switching function
-  // 0 = none
-  // 1 = cosine
-  int switch_inner_flag;
 
   // Self-weight
   double wself;
@@ -148,6 +133,11 @@ class SNA : protected Pointers {
   int nelements;        // number of elements
   int ndoubles;         // number of multi-element pairs
   int ntriples;         // number of multi-element triplets
+	int channels;         // number of density channels (1 for original | nelements for chem | compressed dimensions for chembed)
+
+	// for chemical embedding
+  int chembed_flag;     // 1 for chemical embedding
+
 };
 
 }    // namespace LAMMPS_NS

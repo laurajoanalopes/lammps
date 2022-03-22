@@ -27,11 +27,11 @@ namespace LAMMPS_NS {
 class ComputeSnap : public Compute {
  public:
   ComputeSnap(class LAMMPS *, int, char **);
-  ~ComputeSnap() override;
-  void init() override;
-  void init_list(int, class NeighList *) override;
-  void compute_array() override;
-  double memory_usage() override;
+  ~ComputeSnap();
+  void init();
+  void init_list(int, class NeighList *);
+  void compute_array();
+  double memory_usage();
 
  private:
   int natoms, nmax, size_peratom, lastcol;
@@ -46,14 +46,11 @@ class ComputeSnap : public Compute {
   double *wjelem;
   int *map;    // map types to [0,nelements)
   int nelements, chemflag;
-  int switchinnerflag;
-  double *rinnerelem;
-  double *drinnerelem;
+  int chembeddim, chembedflag;
+	char chembedfile[1024];
   class SNA *snaptr;
   double cutmax;
   int quadraticflag;
-  int bikflag;
-  int bik_rows;
 
   Compute *c_pe;
   Compute *c_virial;

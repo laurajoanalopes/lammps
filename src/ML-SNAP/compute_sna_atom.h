@@ -27,11 +27,11 @@ namespace LAMMPS_NS {
 class ComputeSNAAtom : public Compute {
  public:
   ComputeSNAAtom(class LAMMPS *, int, char **);
-  ~ComputeSNAAtom() override;
-  void init() override;
-  void init_list(int, class NeighList *) override;
-  void compute_peratom() override;
-  double memory_usage() override;
+  ~ComputeSNAAtom();
+  void init();
+  void init_list(int, class NeighList *);
+  void compute_peratom();
+  double memory_usage();
 
  private:
   int nmax;
@@ -44,9 +44,8 @@ class ComputeSNAAtom : public Compute {
   double *wjelem;
   int *map;    // map types to [0,nelements)
   int nelements, chemflag;
-  int switchinnerflag;
-  double *rinnerelem;
-  double *drinnerelem;
+	char chembedfile[1024];
+  int chembeddim,chembedflag;
   class SNA *snaptr;
   double cutmax;
   int quadraticflag;

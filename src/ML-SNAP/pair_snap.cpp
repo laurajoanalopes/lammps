@@ -20,12 +20,12 @@
 #include "force.h"
 #include "memory.h"
 #include "neigh_list.h"
+#include "neigh_request.h"
 #include "neighbor.h"
 #include "sna.h"
 #include "tokenizer.h"
 
 #include <cmath>
-#include <cstring>
 
 using namespace LAMMPS_NS;
 
@@ -45,8 +45,6 @@ PairSNAP::PairSNAP(LAMMPS *lmp) : Pair(lmp)
   radelem = nullptr;
   wjelem = nullptr;
   coeffelem = nullptr;
-  rinnerelem = nullptr;
-  drinnerelem = nullptr;
 
   beta_max = 0;
   beta = nullptr;
@@ -63,11 +61,6 @@ PairSNAP::~PairSNAP()
   memory->destroy(radelem);
   memory->destroy(wjelem);
   memory->destroy(coeffelem);
-
-  if (switchinnerflag) {
-    memory->destroy(rinnerelem);
-    memory->destroy(drinnerelem);
-  }
 
   memory->destroy(beta);
   memory->destroy(bispectrum);
@@ -157,20 +150,16 @@ void PairSNAP::compute(int eflag, int vflag)
         snaptr->inside[ninside] = j;
         snaptr->wj[ninside] = wjelem[jelem];
         snaptr->rcutij[ninside] = (radi + radelem[jelem])*rcutfac;
-        if (switchinnerflag) {
-          snaptr->rinnerij[ninside] = 0.5*(rinnerelem[ielem]+rinnerelem[jelem]);
-          snaptr->drinnerij[ninside] = 0.5*(drinnerelem[ielem]+drinnerelem[jelem]);
-        }
-        if (chemflag) snaptr->element[ninside] = jelem;
+        snaptr->element[ninside] = jelem;
         ninside++;
       }
     }
 
     // compute Ui, Yi for atom I
 
-    if (chemflag)
+    if (chemflag || chembedflag)
       snaptr->compute_ui(ninside, ielem);
-    else
+		else
       snaptr->compute_ui(ninside, 0);
 
     // for neighbors of I within cutoff:
@@ -182,16 +171,35 @@ void PairSNAP::compute(int eflag, int vflag)
 
     for (int jj = 0; jj < ninside; jj++) {
       int j = snaptr->inside[jj];
-      snaptr->compute_duidrj(jj);
-
-      snaptr->compute_deidrj(fij);
-
-      f[i][0] += fij[0]*scale[itype][itype];
-      f[i][1] += fij[1]*scale[itype][itype];
-      f[i][2] += fij[2]*scale[itype][itype];
-      f[j][0] -= fij[0]*scale[itype][itype];
-      f[j][1] -= fij[1]*scale[itype][itype];
-      f[j][2] -= fij[2]*scale[itype][itype];
+			snaptr->compute_duidrj(snaptr->rij[jj], snaptr->wj[jj],
+                               snaptr->rcutij[jj],jj);
+			if (chembedflag) {
+				double aux;
+				int jelem=snaptr->element[jj];
+        double* emb_weights=snaptr->chembed_tau[ielem][jelem];
+				int* doit=snaptr->chembed_do[ielem][jelem];
+				int until=snaptr->chembed_until[ielem][jelem];
+        for (int d = 0; d < until; d++){
+        	snaptr->compute_deidrj(fij, doit[d]);
+          aux=scale[itype][itype]*emb_weights[doit[d]];
+          for (int a = 0; a < 3; a++){
+            fij[a] = fij[a]*aux;
+            f[i][a] += fij[a];
+            f[j][a] -= fij[a];
+          }
+        }
+      } else {
+      	if (chemflag)
+					snaptr->compute_deidrj(fij, snaptr->element[jj]);
+      	else
+      		snaptr->compute_deidrj(fij,0);
+	
+				for (int a = 0; a < 3; a++){
+					fij[a]=fij[a]*scale[itype][itype];
+					f[i][a] += fij[a];
+					f[j][a] -= fij[a];
+				}
+			}			
 
       // tally per-atom virial contribution
 
@@ -215,7 +223,6 @@ void PairSNAP::compute(int eflag, int vflag)
       // E = beta.B + 0.5*B^t.alpha.B
 
       // linear contributions
-
       for (int icoeff = 0; icoeff < ncoeff; icoeff++)
         evdwl += coeffi[icoeff+1]*bispectrum[ii][icoeff];
 
@@ -330,21 +337,17 @@ void PairSNAP::compute_bispectrum()
         snaptr->inside[ninside] = j;
         snaptr->wj[ninside] = wjelem[jelem];
         snaptr->rcutij[ninside] = (radi + radelem[jelem])*rcutfac;
-        if (switchinnerflag) {
-          snaptr->rinnerij[ninside] = 0.5*(rinnerelem[ielem]+rinnerelem[jelem]);
-          snaptr->drinnerij[ninside] = 0.5*(drinnerelem[ielem]+drinnerelem[jelem]);
-        }
-        if (chemflag) snaptr->element[ninside] = jelem;
+        snaptr->element[ninside] = jelem;
         ninside++;
       }
     }
 
-    if (chemflag)
+    if (chemflag || chembedflag)
       snaptr->compute_ui(ninside, ielem);
     else
       snaptr->compute_ui(ninside, 0);
     snaptr->compute_zi();
-    if (chemflag)
+    if (chemflag || chembedflag)
       snaptr->compute_bi(ielem);
     else
       snaptr->compute_bi(0);
@@ -395,9 +398,9 @@ void PairSNAP::coeff(int narg, char **arg)
 
   read_files(arg[2],arg[3]);
 
-  if (!quadraticflag)
+  if (!quadraticflag){
     ncoeff = ncoeffall - 1;
-  else {
+  } else {
 
     // ncoeffall should be (ncoeff+2)*(ncoeff+1)/2
     // so, ncoeff = floor(sqrt(2*ncoeffall))-1
@@ -412,11 +415,13 @@ void PairSNAP::coeff(int narg, char **arg)
 
   snaptr = new SNA(lmp, rfac0, twojmax,
                    rmin0, switchflag, bzeroflag,
-                   chemflag, bnormflag, wselfallflag,
-                   nelements, switchinnerflag);
+                   chemflag, chembeddim, bnormflag, wselfallflag, nelements);
+
+	if (chembedflag)
+		snaptr->read_chembedfile(chembedfile,elements,NULL);
 
   if (ncoeff != snaptr->ncoeff) {
-    if (comm->me == 0)
+		if (comm->me == 0)
       printf("ncoeff = %d snancoeff = %d \n",ncoeff,snaptr->ncoeff);
     error->all(FLERR,"Incorrect SNAP parameter file");
   }
@@ -431,7 +436,6 @@ void PairSNAP::coeff(int narg, char **arg)
   for (int ii = 0; ii < n+1; ii++)
     for (int jj = 0; jj < n+1; jj++)
       scale[ii][jj] = 1.0;
-
 }
 
 /* ----------------------------------------------------------------------
@@ -445,7 +449,9 @@ void PairSNAP::init_style()
 
   // need a full neighbor list
 
-  neighbor->add_request(this, NeighConst::REQ_FULL);
+  int irequest = neighbor->request(this,instance_me);
+  neighbor->requests[irequest]->half = 0;
+  neighbor->requests[irequest]->full = 1;
 
   snaptr->init();
 
@@ -508,7 +514,8 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
     nelemtmp = words.next_int();
     ncoeffall = words.next_int();
   } catch (TokenizerException &e) {
-    error->all(FLERR,"Incorrect format in SNAP coefficient file: {}", e.what());
+    error->all(FLERR,"Incorrect format in SNAP coefficient "
+                                 "file: {}", e.what());
   }
 
   // clean out old arrays and set up element lists
@@ -516,13 +523,9 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
   memory->destroy(radelem);
   memory->destroy(wjelem);
   memory->destroy(coeffelem);
-  memory->destroy(rinnerelem);
-  memory->destroy(drinnerelem);
   memory->create(radelem,nelements,"pair:radelem");
   memory->create(wjelem,nelements,"pair:wjelem");
   memory->create(coeffelem,nelements,ncoeffall,"pair:coeffelem");
-  memory->create(rinnerelem,nelements,"pair:rinnerelem");
-  memory->create(drinnerelem,nelements,"pair:drinnerelem");
 
   // initialize checklist for all required nelements
 
@@ -549,7 +552,7 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
     std::vector<std::string> words;
     try {
       words = Tokenizer(utils::trim_comment(line),"\"' \t\n\r\f").as_vector();
-    } catch (TokenizerException &) {
+    } catch (TokenizerException &e) {
       // ignore
     }
     if (words.size() != 3)
@@ -582,8 +585,8 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
     else
       elementflags[jelem] = 1;
 
-    radelem[jelem] = utils::numeric(FLERR,words[1],false,lmp);
-    wjelem[jelem] = utils::numeric(FLERR,words[2],false,lmp);
+    radelem[jelem] = utils::numeric(FLERR,words[1].c_str(),false,lmp);
+    wjelem[jelem] = utils::numeric(FLERR,words[2].c_str(),false,lmp);
 
     if (comm->me == 0)
       utils::logmesg(lmp,"SNAP Element = {}, Radius {}, Weight {}\n",
@@ -610,7 +613,8 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
 
         coeffelem[jelem][icoeff] = coeff.next_double();
       } catch (TokenizerException &e) {
-        error->all(FLERR,"Incorrect format in SNAP coefficient file: {}", e.what());
+        error->all(FLERR,"Incorrect format in SNAP coefficient "
+                                     "file: {}", e.what());
       }
     }
   }
@@ -619,7 +623,8 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
 
   for (int jelem = 0; jelem < nelements; jelem++) {
     if (elementflags[jelem] == 0)
-      error->all(FLERR,"Element {} not found in SNAP coefficient file", elements[jelem]);
+      error->all(FLERR,"Element {} not found in SNAP coefficient "
+                                   "file", elements[jelem]);
   }
   delete[] elementflags;
 
@@ -636,16 +641,13 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
   bzeroflag = 1;
   quadraticflag = 0;
   chemflag = 0;
+  chembedflag = 0;
+	chembeddim = 0;
+	std::strcpy(chembedfile,"");
   bnormflag = 0;
   wselfallflag = 0;
-  switchinnerflag = 0;
   chunksize = 32768;
   parallel_thresh = 8192;
-
-  // set local input checks
-
-  int rinnerflag = 0;
-  int drinnerflag = 0;
 
   // open SNAP parameter file on proc 0
 
@@ -658,7 +660,7 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
   }
 
   eof = 0;
-  while (true) {
+  while (1) {
     if (comm->me == 0) {
       ptr = fgets(line,MAXLINE,fpparam);
       if (ptr == nullptr) {
@@ -670,109 +672,75 @@ void PairSNAP::read_files(char *coefffilename, char *paramfilename)
     if (eof) break;
     MPI_Bcast(line,MAXLINE,MPI_CHAR,0,world);
 
-    // words = ptrs to all words in line
-    // strip single and double quotes from words
+    // strip comment, skip line if blank
 
     std::vector<std::string> words;
     try {
       words = Tokenizer(utils::trim_comment(line),"\"' \t\n\r\f").as_vector();
-    } catch (TokenizerException &) {
+    } catch (TokenizerException &e) {
       // ignore
     }
 
     if (words.size() == 0) continue;
-
-    if (words.size() < 2)
+    if (words.size() != 2)
       error->all(FLERR,"Incorrect format in SNAP parameter file");
 
     auto keywd = words[0];
     auto keyval = words[1];
 
-    // check for keywords with one value per element
+    if (comm->me == 0)
+      utils::logmesg(lmp,"SNAP keyword {} {}\n",keywd,keyval);
 
-    if (keywd == "rinner" || keywd == "drinner") {
-
-      if (nwords != nelements+1)
-        error->all(FLERR,"Incorrect SNAP parameter file");
-
-      if (comm->me == 0)
-        utils::logmesg(lmp,"SNAP keyword {} {} ... \n", keywd, keyval);
-
-      int iword = 1;
-
-      if (keywd == "rinner") {
-        keyval = words[iword];
-        for (int ielem = 0; ielem < nelements; ielem++) {
-          printf("rinnerelem = %p ielem = %d nelements = %d iword = %d nwords = %d\n",rinnerelem, ielem, nelements, iword, nwords);
-          rinnerelem[ielem] = utils::numeric(FLERR,keyval,false,lmp);
-          iword++;
-        }
-        rinnerflag = 1;
-      } else if (keywd == "drinner") {
-        keyval = words[iword];
-        for (int ielem = 0; ielem < nelements; ielem++) {
-          drinnerelem[ielem] = utils::numeric(FLERR,keyval,false,lmp);
-          iword++;
-        }
-        drinnerflag = 1;
-      }
-
-    } else {
-
-      // all other keywords take one value
-
-      if (nwords != 2)
-        error->all(FLERR,"Incorrect SNAP parameter file");
-
-      if (comm->me == 0)
-        utils::logmesg(lmp,"SNAP keyword {} {}\n",keywd,keyval);
-
-      if (keywd == "rcutfac") {
-        rcutfac = utils::numeric(FLERR,keyval,false,lmp);
-        rcutfacflag = 1;
-      } else if (keywd == "twojmax") {
-        twojmax = utils::inumeric(FLERR,keyval,false,lmp);
-        twojmaxflag = 1;
-      } else if (keywd == "rfac0")
-        rfac0 = utils::numeric(FLERR,keyval,false,lmp);
-      else if (keywd == "rmin0")
-        rmin0 = utils::numeric(FLERR,keyval,false,lmp);
-      else if (keywd == "switchflag")
-        switchflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "bzeroflag")
-        bzeroflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "quadraticflag")
-        quadraticflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "chemflag")
-        chemflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "bnormflag")
-        bnormflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "wselfallflag")
-        wselfallflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "switchinnerflag")
-        switchinnerflag = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "chunksize")
-        chunksize = utils::inumeric(FLERR,keyval,false,lmp);
-      else if (keywd == "parallelthresh")
-        parallel_thresh = utils::inumeric(FLERR,keyval,false,lmp);
-      else
-        error->all(FLERR,"Unknown parameter '{}' in SNAP parameter file", keywd);
-    }
+    if (keywd == "rcutfac") {
+      rcutfac = utils::numeric(FLERR,keyval.c_str(),false,lmp);
+      rcutfacflag = 1;
+    } else if (keywd == "twojmax") {
+      twojmax = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+      twojmaxflag = 1;
+    } else if (keywd == "rfac0")
+      rfac0 = utils::numeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "rmin0")
+      rmin0 = utils::numeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "switchflag")
+      switchflag = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "bzeroflag")
+      bzeroflag = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "quadraticflag")
+      quadraticflag = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "chemflag")
+      chemflag = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+		else if (keywd == "chembeddim") {
+      chembeddim = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+			chembedflag = 1;
+		} else if (keywd == "chembedfile") {
+			std::strcpy(chembedfile,keyval.c_str());
+			chembedflag = 1;
+		} else if (keywd == "bnormflag")
+      bnormflag = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "wselfallflag")
+      wselfallflag = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "chunksize")
+      chunksize = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else if (keywd == "parallelthresh")
+      parallel_thresh = utils::inumeric(FLERR,keyval.c_str(),false,lmp);
+    else
+      error->all(FLERR,"Unknown parameter '{}' in SNAP "
+                                   "parameter file", keywd);
   }
 
   if (rcutfacflag == 0 || twojmaxflag == 0)
     error->all(FLERR,"Incorrect SNAP parameter file");
 
-  if (chemflag && nelemtmp != nelements)
+  if ((chemflag || chembedflag) && nelemtmp != nelements)
     error->all(FLERR,"Incorrect SNAP parameter file");
 
-  if (switchinnerflag && !(rinnerflag && drinnerflag))
-    error->all(FLERR,"Incorrect SNAP parameter file");
+	if (chembedflag == 1 && chembeddim == 0)
+		error->all(FLERR,"You gave the chemical embedding file but forgot to give the dimension");
 
-  if (!switchinnerflag && (rinnerflag || drinnerflag))
-    error->all(FLERR,"Incorrect SNAP parameter file");
+	if (chembedflag == 1 && chembedfile[0] == '\0')
+    error->all(FLERR,"You gave the chemical embedding dimension but forgot to give the file");
+
 }
-
 /* ----------------------------------------------------------------------
    memory usage
 ------------------------------------------------------------------------- */

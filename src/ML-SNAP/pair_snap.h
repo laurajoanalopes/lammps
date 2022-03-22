@@ -21,23 +21,26 @@ PairStyle(snap,PairSNAP);
 #define LMP_PAIR_SNAP_H
 
 #include "pair.h"
+#include <cstring>
 
 namespace LAMMPS_NS {
 
 class PairSNAP : public Pair {
  public:
   PairSNAP(class LAMMPS *);
-  ~PairSNAP() override;
-  void compute(int, int) override;
-  void settings(int, char **) override;
-  void coeff(int, char **) override;
-  void init_style() override;
-  double init_one(int, int) override;
-  double memory_usage() override;
-  void *extract(const char *, int &) override;
+  ~PairSNAP();
+  virtual void compute(int, int);
+  void settings(int, char **);
+  virtual void coeff(int, char **);
+  virtual void init_style();
+  virtual double init_one(int, int);
+  virtual double memory_usage();
+  virtual void *extract(const char *, int &);
 
   double rcutfac, quadraticflag;    // declared public to workaround gcc 4.9
   int ncoeff;                       //  compiler bug, manifest in KOKKOS package
+	int chembeddim;									// chemical embedding dimension (only used if chembedflag == 1)
+	char chembedfile[1024];
 
  protected:
   int ncoeffq, ncoeffall;
@@ -54,14 +57,13 @@ class PairSNAP : public Pair {
   double *radelem;        // element radii
   double *wjelem;         // elements weights
   double **coeffelem;     // element bispectrum coefficients
+	double*** chembed_tau;// chemical embedding compression matrices for each central element
   double **beta;          // betas for all atoms in list
   double **bispectrum;    // bispectrum components for all atoms in list
   double **scale;         // for thermodynamic integration
   int twojmax, switchflag, bzeroflag, bnormflag;
   int chemflag, wselfallflag;
-  int switchinnerflag;    // inner cutoff switch
-  double *rinnerelem;     // element inner cutoff
-  double *drinnerelem;    // element inner cutoff range
+  int chembedflag;
   int chunksize,parallel_thresh;
   double rfac0, rmin0, wj1, wj2;
   int rcutfacflag, twojmaxflag;    // flags for required parameters
