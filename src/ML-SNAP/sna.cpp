@@ -17,13 +17,15 @@
 ------------------------------------------------------------------------- */
 
 #include "sna.h"
-#include <cmath>
+
+#include "comm.h"
+#include "error.h"
 #include "math_const.h"
 #include "math_special.h"
 #include "memory.h"
-#include "error.h"
-#include "comm.h"
 #include "tokenizer.h"
+
+#include <cmath>
 
 using namespace std;
 using namespace LAMMPS_NS;
@@ -31,7 +33,6 @@ using namespace MathConst;
 using namespace MathSpecial;
 
 #define MAXLINE 1024
-
 /* ----------------------------------------------------------------------
 
    this implementation is based on the method outlined
@@ -106,7 +107,7 @@ using namespace MathSpecial;
    j = |j1-j2|, |j1-j2|+2,...,j1+j2-2,j1+j2
 
    [1] Albert Bartok-Partay, "Gaussian Approximation..."
-   Doctoral Thesis, Cambrindge University, (2009)
+   Doctoral Thesis, Cambridge University, (2009)
 
    [2] D. A. Varshalovich, A. N. Moskalev, and V. K. Khersonskii,
    "Quantum Theory of Angular Momentum," World Scientific (1988)
@@ -115,38 +116,41 @@ using namespace MathSpecial;
 
 SNA::SNA(LAMMPS* lmp, double rfac0_in, int twojmax_in,
          double rmin0_in, int switch_flag_in, int bzero_flag_in,
-         int chem_flag_in, int chembed_dim_in, int bnorm_flag_in, int wselfall_flag_in, int nelements_in) : Pointers(lmp)
+         int chem_flag_in, int chembed_dim_in, int bnorm_flag_in,
+         int wselfall_flag_in, int nelements_in, int switch_inner_flag_in
+         ) : Pointers(lmp)
 {
-  // chemical embedding dimension after chem flag!
-
   wself = 1.0;
 
   rfac0 = rfac0_in;
   rmin0 = rmin0_in;
   switch_flag = switch_flag_in;
+  switch_inner_flag = switch_inner_flag_in;
   bzero_flag = bzero_flag_in;
   chem_flag = chem_flag_in;
-	chembed_dim = chembed_dim_in;
-	if (chembed_dim>0)
-		chembed_flag=1;
-	else
-		chembed_flag=0;
+  chembed_dim = chembed_dim_in;
+  if (chembed_dim>0)
+    chembed_flag=1;
+  else
+    chembed_flag=0;
   bnorm_flag = bnorm_flag_in;
   wselfall_flag = wselfall_flag_in;
 
   if (bnorm_flag != chem_flag)
     lmp->error->warning(FLERR, "bnormflag and chemflag are not equal."
                         "This is probably not what you intended");
+
   if (chem_flag && chembed_flag)
     lmp->error->all(FLERR, "Chemflag and chembed_flag both set!");
-	if (chem_flag)
-		channels = nelements_in;
-	else if (chembed_flag)
-		channels = chembed_dim;
-	else
-		channels = 1;
 
-	nelements = nelements_in;
+  if (chem_flag)
+    channels = nelements_in;
+  else if (chembed_flag)
+    channels = chembed_dim;
+  else
+    channels = 1;
+    
+  nelements = nelements_in;
 
   twojmax = twojmax_in;
 
@@ -156,6 +160,8 @@ SNA::SNA(LAMMPS* lmp, double rfac0_in, int twojmax_in,
   inside = nullptr;
   wj = nullptr;
   rcutij = nullptr;
+  sinnerij = nullptr;
+  dinnerij = nullptr;
   element = nullptr;
   nmax = 0;
   idxz = nullptr;
@@ -174,6 +180,7 @@ SNA::SNA(LAMMPS* lmp, double rfac0_in, int twojmax_in,
       else
         bzero[j] = www*(j+1);
   }
+
 }
 
 /* ---------------------------------------------------------------------- */
@@ -184,7 +191,9 @@ SNA::~SNA()
   memory->destroy(inside);
   memory->destroy(wj);
   memory->destroy(rcutij);
-  memory->destroy(element);
+  memory->destroy(sinnerij);
+  memory->destroy(dinnerij);
+  if (chem_flag) memory->destroy(element);
   memory->destroy(ulist_r_ij);
   memory->destroy(ulist_i_ij);
   delete[] idxz;
@@ -321,7 +330,6 @@ void SNA::init()
   init_rootpqarray();
 }
 
-
 void SNA::grow_rij(int newnmax)
 {
   if (newnmax <= nmax) return;
@@ -332,14 +340,18 @@ void SNA::grow_rij(int newnmax)
   memory->destroy(inside);
   memory->destroy(wj);
   memory->destroy(rcutij);
-  memory->destroy(element);
+  memory->destroy(sinnerij);
+  memory->destroy(dinnerij);
+  if (chem_flag || chembed_flag) memory->destroy(element);
   memory->destroy(ulist_r_ij);
   memory->destroy(ulist_i_ij);
   memory->create(rij, nmax, 3, "pair:rij");
   memory->create(inside, nmax, "pair:inside");
   memory->create(wj, nmax, "pair:wj");
   memory->create(rcutij, nmax, "pair:rcutij");
-  memory->create(element, nmax, "sna:element");
+  memory->create(sinnerij, nmax, "pair:sinnerij");
+  memory->create(dinnerij, nmax, "pair:dinnerij");
+  if (chem_flag || chembed_flag) memory->create(element, nmax, "sna:element");
   memory->create(ulist_r_ij, nmax, idxu_max, "sna:ulist_ij");
   memory->create(ulist_i_ij, nmax, idxu_max, "sna:ulist_ij");
 }
@@ -349,12 +361,12 @@ void SNA::grow_rij(int newnmax)
 ------------------------------------------------------------------------- */
 void SNA::read_chembedfile(char *filename, char **elements, int *map){
 
-	// Am I running this from compute or from pair style?
-	bool make_map=false;
-	if (elements != NULL && map == NULL) {
-		make_map=true; // pair style it is!
-		map = new int[nelements+1]; // map[0] will be empty. This is to maintain the same format of the map that comes from the compute
-	}
+  // Am I running this from compute or from pair style?
+  bool make_map=false;
+  if (elements != NULL && map == NULL) {
+    make_map=true; // pair style it is!
+    map = new int[nelements+1]; // map[0] will be empty. This is to maintain the same format of the map that comes from the compute
+  }
 
   // open SNAP chembed file on proc 0
 
@@ -391,12 +403,12 @@ void SNA::read_chembedfile(char *filename, char **elements, int *map){
   std::vector<std::string> file_elements;
   try {
     file_elements = Tokenizer(utils::trim_comment(line),"\"' \t\n\r\f").as_vector();
-		if (make_map) {
-    	for(int ielem = 0; ielem < nelements; ielem++)
-      	for (int jelem = 0; jelem < nelements; jelem++)
-        	if (file_elements[ielem] == elements[jelem])
-          	map[ielem+1] = jelem;
-		}
+    if (make_map) {
+      for(int ielem = 0; ielem < nelements; ielem++)
+        for (int jelem = 0; jelem < nelements; jelem++)
+          if (file_elements[ielem] == elements[jelem])
+            map[ielem+1] = jelem;
+    }
   } catch (TokenizerException &e) {
     error->all(FLERR,"Incorrect format in SNAP chemical embedding "
                                  "file: {}", e.what());
@@ -488,24 +500,24 @@ void SNA::read_chembedfile(char *filename, char **elements, int *map){
     }
   }
 
-	// time saver: save non null index of chembed_tau for loops
-	memory->create(chembed_do,nelements,nelements,chembed_dim,"sna:chembed_do");
-	memory->create(chembed_until,nelements,nelements,"sna:chembed_until");	
-	for (int i = 0; i < nelements; i++) {
+  // time saver: save non null index of chembed_tau for loops
+  memory->create(chembed_do,nelements,nelements,chembed_dim,"sna:chembed_do");
+  memory->create(chembed_until,nelements,nelements,"sna:chembed_until");
+  for (int i = 0; i < nelements; i++) {
     for (int j = 0; j < nelements; j++) {
-			int ind=0;
+      int ind=0;
       for (int k = 0; k < chembed_dim; k++) {
         if (chembed_tau[i][j][k]!=0) {
-					chembed_do[i][j][ind]=k;
-					ind++;
-				}
-			}
-			chembed_until[i][j]=ind;
-		}
-	}
-	// time saver: keep in memory to avoid doing it a bunch of times
-	if (wselfall_flag) {
-		memory->create(chembed_tau_sum,nelements,chembed_dim,"sna:chembed_tau_sum");
+          chembed_do[i][j][ind]=k;
+          ind++;
+        }
+      }
+      chembed_until[i][j]=ind;
+    }
+  }
+  // time saver: keep in memory to avoid doing it a bunch of times
+  if (wselfall_flag) {
+    memory->create(chembed_tau_sum,nelements,chembed_dim,"sna:chembed_tau_sum");
     for (int i = 0; i < nelements; i++) {
       for (int j = 0; j < chembed_dim; j++) {
         chembed_tau_sum[i][j]=0;
@@ -523,9 +535,6 @@ void SNA::read_chembedfile(char *filename, char **elements, int *map){
 void SNA::compute_ui(int jnum, int ielem)
 {
   double rsq, r, x, y, z, z0, theta0;
-	double *emb_weights;
-	int *doit;
-	int until;
 
   // utot(j,ma,mb) = 0 for all j,ma,ma
   // utot(j,ma,ma) = 1 for all j,ma
@@ -547,18 +556,9 @@ void SNA::compute_ui(int jnum, int ielem)
     z0 = r / tan(theta0);
 
     compute_uarray(x, y, z, z0, r, j);
-    if (chem_flag)
-      add_uarraytot(r, wj[j], rcutij[j], j, element[j]);
-    else if (chembed_flag){
-			emb_weights=chembed_tau[ielem][element[j]];
-			doit=chembed_do[ielem][element[j]];
-			until=chembed_until[ielem][element[j]];
-      for (int d = 0; d < until; d++){
-				add_uarraytot(r, wj[j]*emb_weights[doit[d]], rcutij[j], j, doit[d]);
-      }
-		} else
-      add_uarraytot(r, wj[j], rcutij[j], j, 0);
+    add_uarraytot(r, j, ielem);
   }
+
 }
 
 /* ----------------------------------------------------------------------
@@ -755,7 +755,6 @@ void SNA::compute_yi(const double* beta)
 
 void SNA::compute_deidrj(double* dedr, int jelem)
 {
-
   for (int k = 0; k < 3; k++)
     dedr[k] = 0.0;
 
@@ -831,12 +830,12 @@ void SNA::compute_bi(int ielem) {
 
   int itriple = 0;
   int idouble = 0;
-
   for (int elem1 = 0; elem1 < channels; elem1++)
     for (int elem2 = 0; elem2 < channels; elem2++) {
 
       double *zptr_r = &zlist_r[idouble*idxz_max];
       double *zptr_i = &zlist_i[idouble*idxz_max];
+
       for (int elem3 = 0; elem3 < channels; elem3++) {
         for (int jjb = 0; jjb < idxb_max; jjb++) {
           const int j1 = idxb[jjb].j1;
@@ -878,8 +877,7 @@ void SNA::compute_bi(int ielem) {
     }
 
   // apply bzero shift
-
-
+  
   if (bzero_flag) {
     if (chembed_flag) { //chembedflag
       double tau_weight;
@@ -897,9 +895,9 @@ void SNA::compute_bi(int ielem) {
               w3 = chembed_tau[ielem][ielem][elem3];
             }
             else {
-							w1 += chembed_tau_sum[ielem][elem1];
-							w2 += chembed_tau_sum[ielem][elem2];
-							w3 += chembed_tau_sum[ielem][elem3];
+              w1 += chembed_tau_sum[ielem][elem1];
+              w2 += chembed_tau_sum[ielem][elem2];
+              w3 += chembed_tau_sum[ielem][elem3];
             }
             tau_weight = w1*w2*w3;
             for (int jjb = 0; jjb < idxb_max; jjb++) {
@@ -1176,14 +1174,15 @@ void SNA::compute_dbidrj(int jelem)
    calculate derivative of Ui w.r.t. atom j
 ------------------------------------------------------------------------- */
 
-void SNA::compute_duidrj(double* rij, double wj, double rcut, int jj)
+void SNA::compute_duidrj(int jj)
 {
   double rsq, r, x, y, z, z0, theta0, cs, sn;
   double dz0dr;
+  double rcut = rcutij[jj];
 
-  x = rij[0];
-  y = rij[1];
-  z = rij[2];
+  x = rij[jj][0];
+  y = rij[jj][1];
+  z = rij[jj][2];
   rsq = x * x + y * y + z * z;
   r = sqrt(rsq);
   double rscale0 = rfac0 * MY_PI / (rcut - rmin0);
@@ -1193,7 +1192,7 @@ void SNA::compute_duidrj(double* rij, double wj, double rcut, int jj)
   z0 = r * cs / sn;
   dz0dr = z0 / r - (r*rscale0) * (rsq + z0 * z0) / rsq;
 
-  compute_duarray(x, y, z, z0, r, dz0dr, wj, rcut, jj);
+  compute_duarray(x, y, z, z0, r, dz0dr, wj[jj], rcut, jj);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1208,7 +1207,6 @@ void SNA::zero_uarraytot(int ielem)
         ulisttot_r[jelem*idxu_max+jju] = 0.0;
         ulisttot_i[jelem*idxu_max+jju] = 0.0;
 
-        
         // utot(j,ma,ma) = wself, sometimes
         if (!chembed_flag){
           if (jelem == ielem || wselfall_flag)
@@ -1223,7 +1221,6 @@ void SNA::zero_uarraytot(int ielem)
             }
           }
         }
-        
         jju++;
       }
     }
@@ -1234,27 +1231,54 @@ void SNA::zero_uarraytot(int ielem)
    add Wigner U-functions for one neighbor to the total
 ------------------------------------------------------------------------- */
 
-void SNA::add_uarraytot(double r, double wj, double rcut, int jj, int jelem)
+void SNA::add_uarraytot(double r, int jj, int ielem)
 {
   double sfac;
-  sfac = compute_sfac(r, rcut);
+  int jelem;
 
-  sfac *= wj;
+  sfac = compute_sfac(r, rcutij[jj], sinnerij[jj], dinnerij[jj]);
+  sfac *= wj[jj];
+
+  if (chem_flag || chembed_flag) jelem = element[jj];
+  else jelem = 0;
 
   double* ulist_r = ulist_r_ij[jj];
   double* ulist_i = ulist_i_ij[jj];
 
-  for (int j = 0; j <= twojmax; j++) {
-    int jju = idxu_block[j];
-    for (int mb = 0; mb <= j; mb++)
-      for (int ma = 0; ma <= j; ma++) {
-        ulisttot_r[jelem*idxu_max+jju] +=
-          sfac * ulist_r[jju];
-        ulisttot_i[jelem*idxu_max+jju] +=
-          sfac * ulist_i[jju];
-        jju++;
+	if (chembed_flag) {
+    double *emb_weights;
+    int *doit;
+    int until;
+	  emb_weights=chembed_tau[ielem][jelem];
+    doit=chembed_do[ielem][jelem];
+    until=chembed_until[ielem][jelem];
+	  for (int d = 0; d < until; d++){
+      for (int j = 0; j <= twojmax; j++) {
+        int jju = idxu_block[j];
+        for (int mb = 0; mb <= j; mb++)
+          for (int ma = 0; ma <= j; ma++) {
+            ulisttot_r[doit[d]*idxu_max+jju] +=
+              sfac * emb_weights[doit[d]] * ulist_r[jju];
+            ulisttot_i[doit[d]*idxu_max+jju] +=
+              sfac * emb_weights[doit[d]] * ulist_i[jju];
+            jju++;
+          }
       }
+    }
+  } else {
+    for (int j = 0; j <= twojmax; j++) {
+      int jju = idxu_block[j];
+      for (int mb = 0; mb <= j; mb++)
+        for (int ma = 0; ma <= j; ma++) {
+          ulisttot_r[jelem*idxu_max+jju] +=
+            sfac * ulist_r[jju];
+          ulisttot_i[jelem*idxu_max+jju] +=
+            sfac * ulist_i[jju];
+          jju++;
+        }
+    }
   }
+
 }
 
 /* ----------------------------------------------------------------------
@@ -1411,78 +1435,77 @@ void SNA::compute_duarray(double x, double y, double z,
     int jju = idxu_block[j];
     int jjup = idxu_block[j-1];
     for (int mb = 0; 2*mb <= j; mb++) {
-  		dulist_r[jju][0] = 0.0;
-  	  dulist_r[jju][1] = 0.0;
-  	  dulist_r[jju][2] = 0.0;
-  	  dulist_i[jju][0] = 0.0;
-  	  dulist_i[jju][1] = 0.0;
-  	  dulist_i[jju][2] = 0.0;
-	
-	    for (int ma = 0; ma < j; ma++) {
-	      rootpq = rootpqarray[j - ma][j - mb];
-	      for (int k = 0; k < 3; k++) {
-	        dulist_r[jju][k] +=
-	          rootpq * (da_r[k] * ulist_r[jjup] +
-	                    da_i[k] * ulist_i[jjup] +
-	                    a_r * dulist_r[jjup][k] +
-	                    a_i * dulist_i[jjup][k]);
-	        dulist_i[jju][k] +=
-	          rootpq * (da_r[k] * ulist_i[jjup] -
-	                    da_i[k] * ulist_r[jjup] +
-	                    a_r * dulist_i[jjup][k] -
-	                    a_i * dulist_r[jjup][k]);
-	      }
-	
-	      rootpq = rootpqarray[ma + 1][j - mb];
-	      for (int k = 0; k < 3; k++) {
-	        dulist_r[jju+1][k] =
-	          -rootpq * (db_r[k] * ulist_r[jjup] +
-	                     db_i[k] * ulist_i[jjup] +
-	                     b_r * dulist_r[jjup][k] +
-	                     b_i * dulist_i[jjup][k]);
-	        dulist_i[jju+1][k] =
-	          -rootpq * (db_r[k] * ulist_i[jjup] -
-	                     db_i[k] * ulist_r[jjup] +
-	                     b_r * dulist_i[jjup][k] -
-	                     b_i * dulist_r[jjup][k]);
-	      }
-	      jju++;
-	      jjup++;
-	    }
-	    jju++;
-	  }
-	
-		// copy left side to right side with inversion symmetry VMK 4.4(2)
-  	// u[ma-j][mb-j] = (-1)^(ma-mb)*Conj([u[ma][mb])
+      dulist_r[jju][0] = 0.0;
+      dulist_r[jju][1] = 0.0;
+      dulist_r[jju][2] = 0.0;
+      dulist_i[jju][0] = 0.0;
+      dulist_i[jju][1] = 0.0;
+      dulist_i[jju][2] = 0.0;
 
-		jju = idxu_block[j];
-	  jjup = jju+(j+1)*(j+1)-1;
-	  int mbpar = 1;
-	  for (int mb = 0; 2*mb <= j; mb++) {
-	    int mapar = mbpar;
-	    for (int ma = 0; ma <= j; ma++) {
-	      if (mapar == 1) {
-	        for (int k = 0; k < 3; k++) {
-	          dulist_r[jjup][k] = dulist_r[jju][k];
-	          dulist_i[jjup][k] = -dulist_i[jju][k];
-	        }
-	      } else {
-	        for (int k = 0; k < 3; k++) {
-	          dulist_r[jjup][k] = -dulist_r[jju][k];
-	          dulist_i[jjup][k] = dulist_i[jju][k];
-	        }
-	      }
-	      mapar = -mapar;
-	      jju++;
-	      jjup--;
-	    }
-	    mbpar = -mbpar;
-	  }
-	}
+      for (int ma = 0; ma < j; ma++) {
+        rootpq = rootpqarray[j - ma][j - mb];
+        for (int k = 0; k < 3; k++) {
+          dulist_r[jju][k] +=
+            rootpq * (da_r[k] * ulist_r[jjup] +
+                      da_i[k] * ulist_i[jjup] +
+                      a_r * dulist_r[jjup][k] +
+                      a_i * dulist_i[jjup][k]);
+          dulist_i[jju][k] +=
+            rootpq * (da_r[k] * ulist_i[jjup] -
+                      da_i[k] * ulist_r[jjup] +
+                      a_r * dulist_i[jjup][k] -
+                      a_i * dulist_r[jjup][k]);
+        }
 
-	// end of 
-  double sfac = compute_sfac(r, rcut);
-  double dsfac = compute_dsfac(r, rcut);
+        rootpq = rootpqarray[ma + 1][j - mb];
+        for (int k = 0; k < 3; k++) {
+          dulist_r[jju+1][k] =
+            -rootpq * (db_r[k] * ulist_r[jjup] +
+                       db_i[k] * ulist_i[jjup] +
+                       b_r * dulist_r[jjup][k] +
+                       b_i * dulist_i[jjup][k]);
+          dulist_i[jju+1][k] =
+            -rootpq * (db_r[k] * ulist_i[jjup] -
+                       db_i[k] * ulist_r[jjup] +
+                       b_r * dulist_i[jjup][k] -
+                       b_i * dulist_r[jjup][k]);
+        }
+        jju++;
+        jjup++;
+      }
+      jju++;
+    }
+
+    // copy left side to right side with inversion symmetry VMK 4.4(2)
+    // u[ma-j][mb-j] = (-1)^(ma-mb)*Conj([u[ma][mb])
+
+    jju = idxu_block[j];
+    jjup = jju+(j+1)*(j+1)-1;
+    int mbpar = 1;
+    for (int mb = 0; 2*mb <= j; mb++) {
+      int mapar = mbpar;
+      for (int ma = 0; ma <= j; ma++) {
+        if (mapar == 1) {
+          for (int k = 0; k < 3; k++) {
+            dulist_r[jjup][k] = dulist_r[jju][k];
+            dulist_i[jjup][k] = -dulist_i[jju][k];
+          }
+        } else {
+          for (int k = 0; k < 3; k++) {
+            dulist_r[jjup][k] = -dulist_r[jju][k];
+            dulist_i[jjup][k] = dulist_i[jju][k];
+          }
+        }
+        mapar = -mapar;
+        jju++;
+        jjup--;
+      }
+      mbpar = -mbpar;
+    }
+  }
+
+  double sfac = compute_sfac(r, rcut, sinnerij[jj], dinnerij[jj]);
+  double dsfac = compute_dsfac(r, rcut, sinnerij[jj], dinnerij[jj]);
 
   sfac *= wj;
   dsfac *= wj;
@@ -1546,6 +1569,9 @@ double SNA::memory_usage()
   bytes += (double)nmax * sizeof(int);                           // inside
   bytes += (double)nmax * sizeof(double);                        // wj
   bytes += (double)nmax * sizeof(double);                        // rcutij
+  bytes += (double)nmax * sizeof(double);                      // sinnerij
+  bytes += (double)nmax * sizeof(double);                      // dinnerij
+  if (chem_flag || chembed_flag) bytes += (double)nmax * sizeof(int);            // element
 
   return bytes;
 }
@@ -1557,20 +1583,22 @@ void SNA::create_twojmax_arrays()
   memory->create(rootpqarray, jdimpq, jdimpq,
                  "sna:rootpqarray");
   memory->create(cglist, idxcg_max, "sna:cglist");
-	memory->create(ulisttot_r, idxu_max*channels, "sna:ulisttot");
-	memory->create(ulisttot_i, idxu_max*channels, "sna:ulisttot");
-	memory->create(ylist_r, idxu_max*channels, "sna:ylist");
-	memory->create(ylist_i, idxu_max*channels, "sna:ylist");
-	memory->create(zlist_r, idxz_max*ndoubles, "sna:zlist");
-	memory->create(zlist_i, idxz_max*ndoubles, "sna:zlist");
-	memory->create(blist, idxb_max*ntriples, "sna:blist");
-	memory->create(dblist, idxb_max*ntriples, 3, "sna:dblist");
-	memory->create(dulist_r, idxu_max, 3, "sna:dulist");
-	memory->create(dulist_i, idxu_max, 3, "sna:dulist");
+  memory->create(ulisttot_r, idxu_max*channels, "sna:ulisttot");
+  memory->create(ulisttot_i, idxu_max*channels, "sna:ulisttot");
+  memory->create(dulist_r, idxu_max, 3, "sna:dulist");
+  memory->create(dulist_i, idxu_max, 3, "sna:dulist");
+  memory->create(zlist_r, idxz_max*ndoubles, "sna:zlist");
+  memory->create(zlist_i, idxz_max*ndoubles, "sna:zlist");
+  memory->create(blist, idxb_max*ntriples, "sna:blist");
+  memory->create(dblist, idxb_max*ntriples, 3, "sna:dblist");
+  memory->create(ylist_r, idxu_max*channels, "sna:ylist");
+  memory->create(ylist_i, idxu_max*channels, "sna:ylist");
+
   if (bzero_flag)
     memory->create(bzero, twojmax+1,"sna:bzero");
   else
     bzero = nullptr;
+
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1597,13 +1625,13 @@ void SNA::destroy_twojmax_arrays()
 
   if (bzero_flag)
     memory->destroy(bzero);
-	if (chembed_flag)
-		memory->destroy(chembed_tau);
-		memory->destroy(chembed_do);
-		memory->destroy(chembed_until);
-		if (wselfall_flag)
-			memory->destroy(chembed_tau_sum);
 
+  if (chembed_flag)
+    memory->destroy(chembed_tau);
+    memory->destroy(chembed_do);
+    memory->destroy(chembed_until);
+    if (wselfall_flag)
+      memory->destroy(chembed_tau_sum);
 }
 
 /* ----------------------------------------------------------------------
@@ -1743,40 +1771,75 @@ void SNA::compute_ncoeff()
            j <= MIN(twojmax, j1 + j2); j += 2)
         if (j >= j1) ncount++;
 
-  ndoubles = channels*channels;
-  ntriples = ndoubles*channels;
-	ncoeff = ncount*ntriples;
+  ndoubles = channels * channels;
+  ntriples = ndoubles * channels;
+  ncoeff = ncount*ntriples;
 }
 
 /* ---------------------------------------------------------------------- */
 
-double SNA::compute_sfac(double r, double rcut)
+double SNA::compute_sfac(double r, double rcut, double sinner, double dinner)
 {
-  if (switch_flag == 0) return 1.0;
-  if (switch_flag == 1) {
-    if (r <= rmin0) return 1.0;
-    else if (r > rcut) return 0.0;
-    else {
-      double rcutfac = MY_PI / (rcut - rmin0);
-      return 0.5 * (cos((r - rmin0) * rcutfac) + 1.0);
-    }
+  double sfac;
+
+  // calculate sfac = sfac_outer
+
+  if (switch_flag == 0) sfac = 1.0;
+  else if (r <= rmin0) sfac = 1.0;
+  else if (r > rcut) sfac = 0.0;
+  else {
+    double rcutfac = MY_PI / (rcut - rmin0);
+    sfac = 0.5 * (cos((r - rmin0) * rcutfac) + 1.0);
   }
-  return 0.0;
+
+  // calculate sfac *= sfac_inner, rarely visited
+
+  if (switch_inner_flag == 1 && r < sinner + dinner) {
+    if (r > sinner - dinner) {
+      double rcutfac = MY_PI2 / dinner;
+      sfac *= 0.5 * (1.0 - cos(MY_PI2 + (r - sinner) * rcutfac));
+    } else sfac = 0.0;
+  }
+
+  return sfac;
 }
 
 /* ---------------------------------------------------------------------- */
 
-double SNA::compute_dsfac(double r, double rcut)
+double SNA::compute_dsfac(double r, double rcut, double sinner, double dinner)
 {
-  if (switch_flag == 0) return 0.0;
-  if (switch_flag == 1) {
-    if (r <= rmin0) return 0.0;
-    else if (r > rcut) return 0.0;
-    else {
-      double rcutfac = MY_PI / (rcut - rmin0);
-      return -0.5 * sin((r - rmin0) * rcutfac) * rcutfac;
-    }
+  double dsfac, sfac_outer, dsfac_outer, sfac_inner, dsfac_inner;
+  if (switch_flag == 0) dsfac_outer = 0.0;
+  else if (r <= rmin0) dsfac_outer = 0.0;
+  else if (r > rcut) dsfac_outer = 0.0;
+  else {
+    double rcutfac = MY_PI / (rcut - rmin0);
+    dsfac_outer = -0.5 * sin((r - rmin0) * rcutfac) * rcutfac;
   }
-  return 0.0;
-}
 
+  // some duplicated computation, but rarely visited
+
+  if (switch_inner_flag == 1 && r < sinner + dinner) {
+    if (r > sinner - dinner) {
+
+      // calculate sfac_outer
+
+      if (switch_flag == 0) sfac_outer = 1.0;
+      else if (r <= rmin0) sfac_outer = 1.0;
+      else if (r > rcut) sfac_outer = 0.0;
+      else {
+	double rcutfac = MY_PI / (rcut - rmin0);
+	sfac_outer = 0.5 * (cos((r - rmin0) * rcutfac) + 1.0);
+      }
+
+      // calculate sfac_inner
+
+      double rcutfac = MY_PI2 / dinner;
+      sfac_inner = 0.5 * (1.0 - cos(MY_PI2 + (r - sinner) * rcutfac));
+      dsfac_inner = 0.5 * rcutfac * sin(MY_PI2 + (r - sinner) * rcutfac);
+      dsfac = dsfac_outer*sfac_inner + sfac_outer*dsfac_inner;
+    } else dsfac = 0.0;
+  } else dsfac = dsfac_outer;
+
+  return dsfac;
+}

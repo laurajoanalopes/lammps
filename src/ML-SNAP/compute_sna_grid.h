@@ -1,6 +1,6 @@
 /* -*- c++ -*- ----------------------------------------------------------
    LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
-   https://www.lammps.org/, Sandia National Laboratories
+   https://www.lammps.org/ Sandia National Laboratories
    Steve Plimpton, sjplimp@sandia.gov
 
    Copyright (2003) Sandia Corporation.  Under the terms of Contract
@@ -13,41 +13,35 @@
 
 #ifdef COMPUTE_CLASS
 // clang-format off
-ComputeStyle(snav/atom,ComputeSNAVAtom);
+ComputeStyle(sna/grid,ComputeSNAGrid);
 // clang-format on
 #else
 
-#ifndef LMP_COMPUTE_SNAV_ATOM_H
-#define LMP_COMPUTE_SNAV_ATOM_H
+#ifndef LMP_COMPUTE_SNA_GRID_H
+#define LMP_COMPUTE_SNA_GRID_H
 
-#include "compute.h"
+#include "compute_grid.h"
 
 namespace LAMMPS_NS {
 
-class ComputeSNAVAtom : public Compute {
+class ComputeSNAGrid : public ComputeGrid {
  public:
-  ComputeSNAVAtom(class LAMMPS *, int, char **);
-  ~ComputeSNAVAtom() override;
+  ComputeSNAGrid(class LAMMPS *, int, char **);
+  ~ComputeSNAGrid() override;
   void init() override;
-  void init_list(int, class NeighList *) override;
-  void compute_peratom() override;
-  int pack_reverse_comm(int, int, double *) override;
-  void unpack_reverse_comm(int, int *, double *) override;
+  void compute_array() override;
   double memory_usage() override;
 
  private:
-  int nmax;
-  int ncoeff, nvalues;
+  int ncoeff;
   double **cutsq;
-  class NeighList *list;
-  double **snav;
   double rcutfac;
   double *radelem;
   double *wjelem;
   int *map;    // map types to [0,nelements)
   int nelements, chemflag;
-  int chembeddim, chembedflag;
   char chembedfile[1024];
+  int chembeddim,chembedflag;
   int switchinnerflag;
   double *sinnerelem;
   double *dinnerelem;
